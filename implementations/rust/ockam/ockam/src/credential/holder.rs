@@ -3,6 +3,7 @@ use bbs::{
     Challenge, HiddenMessage, Message, MessageGenerators, Nonce, ProofMessage, Prover, PublicKey,
 };
 use ockam_core::lib::{HashSet, Vec};
+use ockam_core::Result;
 use rand::{CryptoRng, RngCore};
 use sha2::digest::{generic_array::GenericArray, Digest, FixedOutput};
 
@@ -15,21 +16,43 @@ pub struct CredentialHolder {
     pub(crate) id: Message,
 }
 
-impl CredentialHolder {
-    /// Create a new CredentialHolder with a new unique id
-    pub fn new(rng: impl RngCore + CryptoRng) -> Self {
-        Self {
-            id: Message::random(rng),
-        }
-    }
-
+pub trait Holder {
     /// Accepts a credential offer from an issuer
-    pub fn accept_credential_offer(
+    fn accept_credential_offer(
         &self,
         offer: &CredentialOffer,
-        issuer_pk: [u8; 96],
+        issuer_pk: PublicKeyBytes,
         rng: impl RngCore + CryptoRng,
-    ) -> Result<(CredentialRequest, CredentialFragment1), CredentialError> {
+    ) -> Result<(CredentialRequest, CredentialFragment1)>;
+
+    /// Combine credential fragments to yield a completed credential
+    fn combine_credential_fragments(
+        &self,
+        credential_fragment1: CredentialFragment1,
+        credential_fragment2: CredentialFragment2,
+    ) -> Credential;
+
+    /// Check a credential to make sure its valid
+    fn is_valid_credential(&self, credential: &Credential, verifying_key: PublicKeyBytes) -> bool;
+
+    /// Given a list of credentials, and a list of manifests
+    /// generates a zero-knowledge presentation. Each credential maps to a presentation manifest
+    fn present_credentials(
+        &self,
+        credential: &[Credential],
+        presentation_manifests: &[PresentationManifest],
+        proof_request_id: ProofRequestIdBytes,
+        rng: impl RngCore + CryptoRng,
+    ) -> Result<Vec<CredentialPresentation>>;
+}
+
+impl Holder for CredentialHolder {
+    fn accept_credential_offer(
+        &self,
+        offer: &CredentialOffer,
+        issuer_pk: PublicKeyBytes,
+        rng: impl RngCore + CryptoRng,
+    ) -> Result<(CredentialRequest, CredentialFragment1)> {
         let nonce = Nonce::from_bytes(&offer.id).unwrap();
         let mut i = 0;
         let mut found = false;
@@ -41,7 +64,7 @@ impl CredentialHolder {
             }
         }
         if !found {
-            return Err(CredentialError::InvalidCredentialSchema);
+            return Err(CredentialError::InvalidCredentialSchema.into());
         }
 
         let pk = PublicKey::from_bytes(&issuer_pk).unwrap();
@@ -61,8 +84,7 @@ impl CredentialHolder {
         ))
     }
 
-    /// Combine credential fragments to yield a completed credential
-    pub fn combine_credential_fragments(
+    fn combine_credential_fragments(
         &self,
         credential_fragment1: CredentialFragment1,
         credential_fragment2: CredentialFragment2,
@@ -82,10 +104,9 @@ impl CredentialHolder {
         }
     }
 
-    /// Check a credential to make sure its valid
-    pub fn is_valid_credential(&self, credential: &Credential, verkey: [u8; 96]) -> bool {
+    fn is_valid_credential(&self, credential: &Credential, verifying_key: PublicKeyBytes) -> bool {
         // credential cannot have zero attributes so unwrap is okay
-        let vk = PublicKey::from_bytes(&verkey).unwrap();
+        let vk = PublicKey::from_bytes(&verifying_key).unwrap();
         let generators = MessageGenerators::from_public_key(vk, credential.attributes.len());
         let msgs = credential
             .attributes
@@ -96,17 +117,13 @@ impl CredentialHolder {
         res.unwrap_u8() == 1
     }
 
-    /// Given a list of credentials, and a list of manifests
-    /// generates a zero-knowledge presentation.
-    ///
-    /// Each credential maps to a presentation manifest
-    pub fn present_credentials(
+    fn present_credentials(
         &self,
         credential: &[Credential],
         presentation_manifests: &[PresentationManifest],
-        proof_request_id: [u8; 32],
+        proof_request_id: ProofRequestIdBytes,
         mut rng: impl RngCore + CryptoRng,
-    ) -> Result<Vec<CredentialPresentation>, CredentialError> {
+    ) -> Result<Vec<CredentialPresentation>> {
         // To prove the id-secret is the same across credentials we use a Schnorr proof
         // which requires that the proof blinding factor be the same. If there's only one credential
         // it makes no difference
@@ -125,7 +142,7 @@ impl CredentialHolder {
             for i in 0..cred.attributes.len() {
                 if pm.credential_schema.attributes[i].label == SECRET_ID {
                     if revealed_indices.contains(&i) {
-                        return Err(CredentialError::InvalidPresentationManifest);
+                        return Err(CredentialError::InvalidPresentationManifest.into());
                     }
                     messages.push(ProofMessage::Hidden(HiddenMessage::ExternalBlinding(
                         self.id, id_bf,
@@ -177,5 +194,14 @@ impl CredentialHolder {
         }
 
         Ok(proofs)
+    }
+}
+
+impl CredentialHolder {
+    /// Create a new CredentialHolder with a new unique id
+    pub fn new(rng: impl RngCore + CryptoRng) -> Self {
+        Self {
+            id: Message::random(rng),
+        }
     }
 }

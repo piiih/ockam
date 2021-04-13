@@ -3,6 +3,7 @@ use bbs::{Issuer as BbsIssuer, MessageGenerators, Nonce, PublicKey, SecretKey};
 use bls::ProofOfPossession;
 use core::convert::TryFrom;
 use ockam_core::lib::{HashMap, String, Vec};
+use ockam_core::Result;
 use rand::{CryptoRng, RngCore};
 
 /// Represents an issuer of a credential
@@ -11,58 +12,50 @@ pub struct CredentialIssuer {
     signing_key: SecretKey,
 }
 
-/// Alias for an array of 32 bytes.
-pub type SigningKeyBytes = [u8; 32];
-
-/// Alias for an array of 96 bytes.
-pub type PublicKeyBytes = [u8; 96];
-
-/// Alias for an array of 48 bytes.
-pub type ProofBytes = [u8; 48];
-
-/// Alias for an array of 32 bytes.
-pub type OfferIdBytes = [u8; 32];
-
-impl CredentialIssuer {
-    /// Create issuer with a new issuing key
-    pub fn new(rng: impl RngCore + CryptoRng) -> Self {
-        Self {
-            signing_key: SecretKey::random(rng).expect("bad random number generator"),
-        }
-    }
-
+pub trait Issuer {
     /// Return the signing key associated with this CredentialIssuer
-    pub fn get_signing_key(&self) -> SigningKeyBytes {
+    fn get_signing_key(&self) -> SigningKeyBytes;
+
+    /// Return the public key
+    fn get_public_key(&self) -> PublicKeyBytes;
+
+    /// Create a credential offer
+    fn create_offer(
+        &self,
+        schema: &CredentialSchema,
+        rng: impl RngCore + CryptoRng,
+    ) -> CredentialOffer;
+
+    /// Create a proof of possession for this issuers signing key
+    fn create_proof_of_possession(&self) -> ProofBytes;
+
+    /// Sign the claims into the credential
+    fn sign_credential(
+        &self,
+        schema: &CredentialSchema,
+        attributes: &[CredentialAttribute],
+    ) -> Result<Credential>;
+
+    /// Sign a credential request where certain claims have already been committed and signs the remaining claims
+    fn sign_credential_request(
+        &self,
+        ctx: &CredentialRequest,
+        schema: &CredentialSchema,
+        attributes: &[(String, CredentialAttribute)],
+        offer_id: OfferIdBytes,
+    ) -> Result<CredentialFragment2>;
+}
+
+impl Issuer for CredentialIssuer {
+    fn get_signing_key(&self) -> SigningKeyBytes {
         self.signing_key.to_bytes()
     }
 
-    /// Return the public key
-    pub fn get_public_key(&self) -> PublicKeyBytes {
+    fn get_public_key(&self) -> PublicKeyBytes {
         let pk = PublicKey::from(&self.signing_key);
         pk.to_bytes()
     }
-
-    /// Initialize an issuer with an already generated key
-    pub fn with_signing_key(signing_key: SigningKeyBytes) -> Self {
-        let signing_key = SecretKey::from_bytes(&signing_key).unwrap();
-        Self { signing_key }
-    }
-
-    /// Initialize an issuer with a hex encoded, already generated key
-    pub fn with_signing_key_hex(signing_key_hex: String) -> Option<Self> {
-        if let Ok(key) = ockam_core::hex::decode(signing_key_hex) {
-            if let Ok(key) = <SigningKeyBytes>::try_from(key.as_slice()) {
-                Some(CredentialIssuer::with_signing_key(key))
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }
-
-    /// Create a credential offer
-    pub fn create_offer(
+    fn create_offer(
         &self,
         schema: &CredentialSchema,
         rng: impl RngCore + CryptoRng,
@@ -74,21 +67,19 @@ impl CredentialIssuer {
         }
     }
 
-    /// Create a proof of possession for this issuers signing key
-    pub fn create_proof_of_possession(&self) -> ProofBytes {
+    fn create_proof_of_possession(&self) -> ProofBytes {
         ProofOfPossession::new(&self.signing_key)
             .expect("bad signing key")
             .to_bytes()
     }
 
-    /// Sign the claims into the credential
-    pub fn sign_credential(
+    fn sign_credential(
         &self,
         schema: &CredentialSchema,
         attributes: &[CredentialAttribute],
-    ) -> Result<Credential, CredentialError> {
+    ) -> Result<Credential> {
         if schema.attributes.len() != attributes.len() {
-            return Err(CredentialError::MismatchedAttributesAndClaims);
+            return Err(CredentialError::MismatchedAttributesAndClaims.into());
         }
         let mut messages = Vec::new();
         for (att, v) in schema.attributes.iter().zip(attributes) {
@@ -104,7 +95,7 @@ impl CredentialIssuer {
                 }
                 (_, CredentialAttribute::NotSpecified) => messages.push(v.to_signature_message()),
                 (_, CredentialAttribute::Empty) => messages.push(v.to_signature_message()),
-                (_, _) => return Err(CredentialError::MismatchedAttributeClaimType),
+                (_, _) => return Err(CredentialError::MismatchedAttributeClaimType.into()),
             }
         }
 
@@ -119,16 +110,15 @@ impl CredentialIssuer {
         })
     }
 
-    /// Sign a credential request where certain claims have already been committed and signs the remaining claims
-    pub fn sign_credential_request(
+    fn sign_credential_request(
         &self,
         ctx: &CredentialRequest,
         schema: &CredentialSchema,
         attributes: &[(String, CredentialAttribute)],
         offer_id: OfferIdBytes,
-    ) -> Result<CredentialFragment2, CredentialError> {
+    ) -> Result<CredentialFragment2> {
         if attributes.len() >= schema.attributes.len() {
-            return Err(CredentialError::MismatchedAttributesAndClaims);
+            return Err(CredentialError::MismatchedAttributesAndClaims.into());
         }
 
         let mut atts = HashMap::new();
@@ -150,12 +140,12 @@ impl CredentialIssuer {
             match atts.get(&att.label) {
                 None => {
                     if !att.unknown {
-                        return Err(CredentialError::InvalidCredentialAttribute);
+                        return Err(CredentialError::InvalidCredentialAttribute.into());
                     }
                 }
                 Some(data) => {
                     if **data != att.attribute_type {
-                        return Err(CredentialError::MismatchedAttributeClaimType);
+                        return Err(CredentialError::MismatchedAttributeClaimType.into());
                     }
                     remaining_atts.push((i, (*data).clone()));
                     messages.push((i, (*data).to_signature_message()));
@@ -179,6 +169,33 @@ impl CredentialIssuer {
             attributes: remaining_atts.iter().map(|(_, v)| v.clone()).collect(),
             signature,
         })
+    }
+}
+impl CredentialIssuer {
+    /// Create issuer with a new issuing key
+    pub fn new(rng: impl RngCore + CryptoRng) -> Self {
+        Self {
+            signing_key: SecretKey::random(rng).expect("bad random number generator"),
+        }
+    }
+
+    /// Initialize an issuer with an already generated key
+    pub fn with_signing_key(signing_key: SigningKeyBytes) -> Self {
+        let signing_key = SecretKey::from_bytes(&signing_key).unwrap();
+        Self { signing_key }
+    }
+
+    /// Initialize an issuer with a hex encoded, already generated key
+    pub fn with_signing_key_hex(signing_key_hex: String) -> Option<Self> {
+        if let Ok(key) = ockam_core::hex::decode(signing_key_hex) {
+            if let Ok(key) = <SigningKeyBytes>::try_from(key.as_slice()) {
+                Some(CredentialIssuer::with_signing_key(key))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     }
 }
 

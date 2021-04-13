@@ -45,3 +45,10 @@ pub use ockam_core::{
 };
 
 pub use ockam_channel::{SecureChannel, SecureChannelListenerMessage};
+
+use rand::{CryptoRng, RngCore};
+
+/// A type that combines the required RNG traits.
+pub trait Rng: RngCore + CryptoRng {}
+
+impl<T: RngCore + CryptoRng> Rng for T {}

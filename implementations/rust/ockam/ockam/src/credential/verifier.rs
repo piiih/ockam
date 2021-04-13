@@ -11,12 +11,12 @@ pub struct CredentialVerifier;
 
 impl CredentialVerifier {
     /// Create a unique proof request id so the holder must create a fresh proof
-    pub fn create_proof_request_id(rng: impl RngCore) -> [u8; 32] {
+    pub fn create_proof_request_id(rng: impl RngCore) -> ProofRequestIdBytes {
         Nonce::random(rng).to_bytes()
     }
 
     /// Verify a proof of possession
-    pub fn verify_proof_of_possession(issuer_vk: [u8; 96], proof: [u8; 48]) -> bool {
+    pub fn verify_proof_of_possession(issuer_vk: PublicKeyBytes, proof: ProofBytes) -> bool {
         let vk = PublicKey::from_bytes(&issuer_vk);
         let proof = ProofOfPossession::from_bytes(&proof);
 
@@ -33,7 +33,7 @@ impl CredentialVerifier {
     pub fn verify_credential_presentations(
         presentations: &[CredentialPresentation],
         presentation_manifests: &[PresentationManifest],
-        proof_request_id: [u8; 32],
+        proof_request_id: ProofRequestIdBytes,
     ) -> ockam_core::lib::Result<(), CredentialError> {
         if presentations.len() != presentation_manifests.len() || presentations.len() == 0 {
             return Err(CredentialError::MismatchedPresentationAndManifests);

@@ -33,6 +33,19 @@ pub use verifier::*;
 use bbs::Signature;
 use serde::{Deserialize, Serialize};
 
+/// Alias for an array of 32 bytes.
+pub type SigningKeyBytes = [u8; 32];
+
+/// Alias for an array of 96 bytes.
+pub type PublicKeyBytes = [u8; 96];
+
+/// Alias for an array of 48 bytes.
+pub type ProofBytes = [u8; 48];
+
+/// Alias for an array of 32 bytes.
+pub type OfferIdBytes = [u8; 32];
+pub type ProofRequestIdBytes = [u8; 32];
+
 /// A credential that can be presented
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Credential {
