@@ -1,7 +1,7 @@
 defmodule Ockam.Examples.Stream.ConsumerWorker do
   @moduledoc false
   use Ockam.Worker
-  use Ockam.MessageProtocol
+  use Ockam.Protocol.Mapping
 
   alias Ockam.Message
   alias Ockam.Protocol.Stream, as: StreamProtocol
@@ -29,16 +29,18 @@ defmodule Ockam.Examples.Stream.ConsumerWorker do
     )
   end
 
+  @protocol_mapping Ockam.Protocol.Mapping.mapping([
+                      {:client, StreamProtocol.Create},
+                      {:client, StreamProtocol.Partitioned.Create},
+                      {:client, StreamProtocol.Pull},
+                      {:client, StreamProtocol.Index},
+                      {:client, Ockam.Protocol.Error},
+                      {:client, Ockam.Protocol.Binary}
+                    ])
+
   @impl true
   def protocol_mapping() do
-    ## TODO: this can be memoized in compile time with a macro
-    Ockam.Protocol.mapping([
-      {:client, StreamProtocol.Create},
-      {:client, StreamProtocol.Pull},
-      {:client, StreamProtocol.Index},
-      {:client, Ockam.Protocol.Error},
-      {:client, Ockam.Protocol.Binary}
-    ])
+    @protocol_mapping
   end
 
   @impl true
@@ -47,8 +49,9 @@ defmodule Ockam.Examples.Stream.ConsumerWorker do
     index_route = Keyword.fetch!(options, :index_route)
     stream_name = Keyword.fetch!(options, :stream_name)
     receiver = Keyword.fetch!(options, :receiver)
+    partitions = Keyword.fetch!(options, :partitions)
 
-    create_stream(service_route, stream_name, state)
+    create_stream(service_route, stream_name, partitions, state)
 
     state =
       struct(__MODULE__, state)
@@ -62,23 +65,29 @@ defmodule Ockam.Examples.Stream.ConsumerWorker do
   @impl true
   def handle_message(%{payload: payload} = message, state) do
     case decode_payload(payload) do
-      {:ok, "stream_create", %{stream_name: stream_name}} ->
+      {:ok, StreamProtocol.Create, %{stream_name: stream_name}} ->
         state = add_stream(state, stream_name, Message.return_route(message))
 
         request_index(state)
         {:ok, state}
 
-      {:ok, "stream_pull", %{request_id: request_id, messages: messages}} ->
+      {:ok, StreamProtocol.Partitioned.Create, %{stream_name: stream_name, partition: 0}} ->
+        state = add_stream(state, stream_name, Message.return_route(message))
+
+        request_index(state)
+        {:ok, state}
+
+      {:ok, StreamProtocol.Pull, %{request_id: request_id, messages: messages}} ->
         state = messages_received(request_id, messages, state)
         {:ok, state}
 
-      {:ok, "stream_index", %{client_id: client_id, stream_name: stream_name, index: index}} ->
+      {:ok, StreamProtocol.Index, %{client_id: client_id, stream_name: stream_name, index: index}} ->
         validate_index(client_id, stream_name, state)
         Logger.info("Initial index #{index}")
         state = consume(index, state)
         {:ok, state}
 
-      {:ok, "error", %{reason: reason}} ->
+      {:ok, Ockam.Protocol.Error, %{reason: reason}} ->
         Logger.error("Stream error: #{inspect(reason)}")
         {:ok, state}
 
@@ -96,7 +105,7 @@ defmodule Ockam.Examples.Stream.ConsumerWorker do
 
   def request_index(state) do
     index_id = index_id(state)
-    index_request = encode_payload("stream_index", :get, index_id)
+    index_request = encode_payload(StreamProtocol.Index, :get, index_id)
     index_route = Map.get(state, :index_route)
     route(index_request, index_route, state)
   end
@@ -122,7 +131,7 @@ defmodule Ockam.Examples.Stream.ConsumerWorker do
 
   def save_index(index, state) do
     index_id = index_id(state)
-    index_request = encode_payload("stream_index", :save, Map.put(index_id, :index, index))
+    index_request = encode_payload(StreamProtocol.Index, :save, Map.put(index_id, :index, index))
     index_route = Map.get(state, :index_route)
     route(index_request, index_route, state)
   end
@@ -135,12 +144,20 @@ defmodule Ockam.Examples.Stream.ConsumerWorker do
 
   def request_messages(state) do
     next_request_id = :rand.uniform(1000)
-    start_index = Map.get(state, :index, 0) + 1
+
+    start_index =
+      case Map.get(state, :index, :undefined) do
+        :undefined -> 0
+        num when is_integer(num) -> num + 1
+      end
+
     send_pull_request(start_index, @consume_limit, next_request_id, state)
   end
 
   def send_pull_request(index, limit, request_id, state) do
-    encoded = encode_payload("stream_pull", %{index: index, limit: limit, request_id: request_id})
+    encoded =
+      encode_payload(StreamProtocol.Pull, %{index: index, limit: limit, request_id: request_id})
+
     stream_route = Map.get(state, :stream_route)
     route(encoded, stream_route, state)
   end
@@ -170,7 +187,7 @@ defmodule Ockam.Examples.Stream.ConsumerWorker do
     receiver = Map.get(state, :receiver)
 
     Enum.each(messages, fn %{data: data} ->
-      payload = Ockam.MessageProtocol.encode_payload(Ockam.Protocol.Binary, :request, data)
+      payload = encode_payload(Ockam.Protocol.Binary, data)
       route(payload, [receiver], state)
     end)
   end
@@ -179,8 +196,13 @@ defmodule Ockam.Examples.Stream.ConsumerWorker do
     Map.merge(state, %{stream_name: stream_name, stream_route: stream_route})
   end
 
-  def create_stream(service_route, stream_name, state) do
-    encoded = encode_payload("stream_create", %{stream_name: stream_name})
+  def create_stream(service_route, stream_name, partitions, state) do
+    encoded =
+      encode_payload(StreamProtocol.Partitioned.Create, %{
+        stream_name: stream_name,
+        partitions: partitions
+      })
+
     route(encoded, service_route, state)
   end
 
